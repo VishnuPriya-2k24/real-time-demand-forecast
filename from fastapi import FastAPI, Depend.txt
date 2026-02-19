@@ -1,0 +1,95 @@
+from fastapi import FastAPI, Depends, HTTPException
+from fastapi.security import OAuth2PasswordBearer
+from pydantic import BaseModel
+from jose import jwt, JWTError
+import time
+
+app = FastAPI()
+SECRET = "super_secret_key"  # In real apps, put this in environment variables
+ALGORITHM = "HS256"
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="auth/login")
+
+# Mock Users (normally you’d use a DB)
+users = {
+    "alice": {"id": "1", "password": "123", "role": "Patient"},
+    "nurse": {"id": "2", "password": "123", "role": "Nurse"},
+    "doc": {"id": "3", "password": "123", "role": "Doctor"},
+    "admin": {"id": "4", "password": "123", "role": "Administrator"},
+}
+
+# Role → Permissions
+role_permissions = {
+    "Patient": ["view_records"],
+    "Nurse": ["view_records", "update_status"],
+    "Doctor": ["view_records", "update_status", "prescribe_medication"],
+    "Administrator": ["manage_users", "view_records"],
+}
+
+
+class LoginBody(BaseModel):
+    username: str
+    password: str
+
+
+@app.post("/auth/login")
+def login(body: LoginBody):
+    user = users.get(body.username)
+    if not user or user["password"] != body.password:
+        raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    payload = {
+        "sub": user["id"],
+        "role": user["role"],
+        "permissions": role_permissions[user["role"]],
+        "exp": int(time.time()) + 3600
+    }
+    token = jwt.encode(payload, SECRET, algorithm=ALGORITHM)
+    return {"access_token": token, "expires_in": 3600}
+
+
+def get_current_user(token: str = Depends(oauth2_scheme)):
+    try:
+        return jwt.decode(token, SECRET, algorithms=[ALGORITHM])
+    except JWTError:
+        raise HTTPException(status_code=401, detail="Invalid token")
+
+
+def require_permission(perm: str):
+    def wrapper(user=Depends(get_current_user)):
+        if perm in user["permissions"] or user["role"] == "Administrator":
+            return user
+        raise HTTPException(status_code=403, detail="Forbidden")
+
+    return wrapper
+
+
+# 1. View Records
+@app.get("/records/{patient_id}")
+def view_records(patient_id: str, user=Depends(require_permission("view_records"))):
+    if user["role"] == "Patient" and user["sub"] != patient_id:
+        raise HTTPException(status_code=403, detail="Patients can only view their own records")
+    return {"patient_id": patient_id, "records": ["Sample record"]}
+
+
+# 2. Update Patient Status
+@app.patch("/records/{patient_id}/status")
+def update_status(patient_id: str, user=Depends(require_permission("update_status"))):
+    return {"message": f"Status updated for patient {patient_id}"}
+
+
+# 3. Prescribe Medication
+@app.post("/records/{patient_id}/prescriptions")
+def prescribe(patient_id: str, user=Depends(require_permission("prescribe_medication"))):
+    return {"message": f"Prescription added for patient {patient_id}"}
+
+
+# 4. Manage Users
+@app.post("/users")
+def manage_users(user=Depends(require_permission("manage_users"))):
+    return {"message": "User account created"}
+
+
+@app.get("/")
+def home():
+    return {"message": "Healthcare API is running "}
